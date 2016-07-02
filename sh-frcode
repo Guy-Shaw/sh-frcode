@@ -1,0 +1,217 @@
+#! /usr/bin/perl -w
+    eval 'exec /usr/bin/perl -S $0 ${1+"$@"}'
+        if 0; #$running_under_some_shell
+
+# Filename: sh-frcode
+# Brief: Do human-readable, shell-executable front-compression
+#
+# Copyright (C) 2016 Guy Shaw
+# Written by Guy Shaw <gshaw@acm.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as
+# published by the Free Software Foundation; either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+=pod
+
+=begin description
+
+Do GNU-frcode-style front-compression on a list of paths,
+but produce a human-readable shell script, which defines
+some variable names and compresses the paths by doing shell
+inverse variable substitution.
+
+Input:
+  1) A list of shell variable assignments;
+  2) A list of pathnames.
+
+  Neither list need be sorted, because what compression there is
+  relies solely on the defined variables and their values, and how
+  much space is saved by doing shell variable substitution; not based
+  on any other context; not based on automatic detection of dictionary
+  entries, and not based on back-references to previous paths or
+  locality of any kind.
+
+Output:
+  A shell script, consisting of:
+    1) Assignments to variable names;
+    2) One or more 'cat' commands, each emitting an unquoted
+       here document.
+
+  When the shell command is run, the original list of paths
+  is reproduced, exactly.
+
+=end description
+
+=cut
+
+require 5.0;
+use strict;
+use warnings;
+use Carp;
+use diagnostics;
+use Getopt::Long;
+use File::Spec::Functions;
+
+my $eprint_fh;
+my $dprint_fh;
+
+my $debug   = 0;
+my $verbose = 0;
+
+my @options = (
+    'debug'   => \$debug,
+    'verbose' => \$verbose,
+);
+
+#:subroutines:#
+
+# Decide how to direct eprint*() and dprint*() functions.
+# If STDOUT and STDERR are directed to the same "channel",
+# then eprint*() and dprint*() should be tied to the same file handle.
+#
+# Otherwise, buffering could cause a mix of STDOUT and STDERR to
+# be written out of order.
+#
+sub set_print_fh {
+    my @stdout_statv;
+    my @stderr_statv;
+    my $stdout_chan;
+    my $stderr_chan;
+
+    @stdout_statv = stat(*STDOUT);
+    @stderr_statv = stat(*STDERR);
+    $stdout_chan = join(':', @stdout_statv[0, 1, 6]);
+    $stderr_chan = join(':', @stderr_statv[0, 1, 6]);
+    if (!defined($eprint_fh)) {
+        $eprint_fh = ($stderr_chan eq $stdout_chan) ? *STDOUT : *STDERR;
+    }
+    if (!defined($dprint_fh)) {
+        $dprint_fh = ($stderr_chan eq $stdout_chan) ? *STDOUT : *STDERR;
+    }
+}
+
+sub eprint {
+    if (-t $eprint_fh) {
+        print {$eprint_fh} "\e[01;31m\e[K", @_, "\e[m\e[K";
+    }
+    else {
+        print {$eprint_fh} @_;
+    }
+}
+
+sub eprintf {
+    if (-t $eprint_fh) {
+        print  {$eprint_fh}  "\e[01;31m\e[K";
+        printf {$eprint_fh} @_;
+        print  {$eprint_fh}  "\e[m\e[K";
+    }
+    else {
+        printf {$eprint_fh} @_;
+    }
+}
+
+sub dprint {
+    print {$dprint_fh} @_ if ($debug);
+}
+
+sub dprintf {
+    printf {$dprint_fh} @_ if ($debug);
+}
+
+sub is_prefix {
+    my ($pfx, $str) = @_;
+    my $lpfx = length($pfx);
+    my $lstr = length($str);
+    return $lstr > $lpfx && substr($str, 0, $lpfx) eq $pfx;
+}
+
+#:options:#
+
+set_print_fh();
+
+GetOptions(@options) or exit 2;
+
+#:main:#
+
+
+my %var_dict = ();
+my %var_used = ();
+
+# Read assignemt statements, up to a line == '---'
+#
+while (<>) {
+    chomp;
+    s{\r\z}{}msx;
+    s{\s+\z}{}msx;
+    s{\A\s+}{}msx;
+    next if ($_ eq '');
+    last if ($_ eq '---');
+    if (m{\A([A-Za-z_][A-Za-z_0-9]*)=(.*)\z}msx) {
+        my $var = $1;
+        my $val = $2;
+        $var_dict{$var} = $val;
+    }
+}
+
+# Read the text to be compressed, usually path names.
+#
+my @save = ();
+while (<>) {
+    chomp;
+    s{\r\z}{}msx;
+
+    next if ($_ eq '');
+    my $max_var = '';
+    my $max_val = '';
+    my $max_sav = 0;
+    for my $var (keys %var_dict) {
+        my $val = $var_dict{$var};
+        my $pfx = $val . '/';
+        my $lvar = length($var);
+        my $lval = length($val);
+        my $sav = $lval - ($lvar + 1);
+        if ($_ eq $val || is_prefix($pfx, $_)) {
+            if ($sav > 0 && $sav > $max_sav) {
+                $max_var = $var;
+                $max_val = $val;
+                $max_sav = $sav;
+            }
+        }
+    }
+
+    if ($max_sav > 0) {
+        my $sfx = substr($_, length($max_val));
+        push(@save, '$' . $max_var . $sfx);
+        $var_used{$max_var} = 1;
+    }
+    else {
+        push(@save, $_);
+    }
+}
+
+# Print shell assignment statements
+#
+for my $var (sort keys %var_used) {
+    print $var, '=', $var_dict{$var}, "\n";
+}
+
+# Print shell here document containing "compressed" pathnames
+#
+print "\n";
+print "cat <<__END__\n";
+for (@save) {
+    print $_, "\n";
+}
+print '__END__', "\n";
+
+exit 0;
