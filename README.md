@@ -1,6 +1,6 @@
 # sh-frcode
 
-### Homan-readable, shell-executable front-compression
+### Human-readable, shell-executable front-compression
 
 `sh-frcode` does GNU-frcode-style front-compression on a list of paths,
 but produces a human-readable shell script, which defines
